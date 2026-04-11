@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+models/
+*.onnx
+*.onnx.json
+*.pt
+*.bin
+*.pt

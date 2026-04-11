@@ -1,7 +1,17 @@
 import os
 import sys
+
+# Ensure UTF-8 output for Windows console to handle emojis
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 import time
 import logging
+import asyncio
+import urllib.request
+import json
 from dotenv import load_dotenv
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -11,7 +21,7 @@ load_dotenv(os.path.join(_script_dir, ".env"))
 # Add src to python path for local imports
 sys.path.insert(0, os.path.join(_script_dir, "src"))
 
-from livekit import agents
+from livekit import agents, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import silero
 from livekit.plugins import openai as lk_openai
@@ -45,6 +55,27 @@ class VoiceAssistant(Agent):
             Keep your responses concise and conversational - aim for 1-2 sentences.
             Be friendly and natural in your speech patterns."""
         )
+
+def _warmup_ollama_sync():
+    """Blocking function to ping Ollama and load the model into VRAM."""
+    try:
+        ollama_host = OLLAMA_BASE_URL.replace("/v1", "")
+        req = urllib.request.Request(
+            f"{ollama_host}/api/generate",
+            data=json.dumps({"model": OLLAMA_MODEL, "prompt": "warmup", "options": {"num_predict": 1}, "stream": False}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=60):
+            pass
+    except Exception as e:
+        logger.warning(f"Warmup ping failed: {e}")
+
+async def warmup_ollama():
+    """Async wrapper for the ollama warmup."""
+    logger.info("Warming up Ollama VRAM...")
+    await asyncio.to_thread(_warmup_ollama_sync)
+    logger.info("Ollama warmup complete!")
 
 def create_local_session() -> AgentSession:
     logger.info("=" * 60)
@@ -98,6 +129,21 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             latency_ms = (time.perf_counter() - _transcription_time) * 1000
             logger.info(f"ROUND-TRIP LATENCY: {latency_ms:.0f}ms (LLM + TTS)")
             _transcription_time = None
+
+    async def send_chat(msg: str):
+        payload = json.dumps({
+            "id": str(time.time()),
+            "message": msg,
+            "timestamp": int(time.time() * 1000)
+        })
+        await ctx.room.local_participant.publish_data(payload, topic="lk-chat")
+
+    await send_chat("Loading recipe to GPU oven... please give me a moment to warm up! 🍳")
+
+    # Force the model to load into GPU so the first real response is fast
+    await warmup_ollama()
+    
+    await send_chat("Ding! Oven is hot. Start speaking when you're ready! 🗣️")
 
     await session.start(
         room=ctx.room,

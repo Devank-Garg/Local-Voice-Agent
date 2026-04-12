@@ -12,7 +12,10 @@ import logging
 import asyncio
 import urllib.request
 import json
+import re
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+from typing import Any
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 # Load environment variables from .env
@@ -22,7 +25,8 @@ load_dotenv(os.path.join(_script_dir, ".env"))
 sys.path.insert(0, os.path.join(_script_dir, "src"))
 
 from livekit import agents, rtc
-from livekit.agents import AgentSession, Agent, RoomInputOptions
+from livekit.agents import AgentSession, Agent, RoomInputOptions, function_tool, RunContext
+from livekit.agents.llm import LLM, ChatContext, ChatChunk
 from livekit.plugins import silero
 from livekit.plugins import openai as lk_openai
 
@@ -47,6 +51,42 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "ministral-3:3b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
 
+class CleanOutputLLM(LLM):
+    """Wrapper LLM that cleans output for speech synthesis."""
+
+    def __init__(self, base_llm: LLM):
+        super().__init__()
+        self.base_llm = base_llm
+
+    def _clean_text(self, text: str) -> str:
+        """Clean LLM output to make it suitable for speech synthesis."""
+        if not text:
+            return text
+
+        # Only remove asterisks used for emphasis or markdown bold/italic
+        return text.replace('*', '')
+
+    @asynccontextmanager
+    async def chat(self, *, chat_ctx: ChatContext, tools=None, tool_choice=None, **kwargs):
+        """Override chat method to clean output."""
+        async with self.base_llm.chat(chat_ctx=chat_ctx, tools=tools, tool_choice=tool_choice, **kwargs) as stream:
+            async def process_stream():
+                async for chunk in stream:
+                    if chunk is None:
+                        continue
+
+                    # Clean the content if it exists
+                    if hasattr(chunk, 'delta') and hasattr(chunk.delta, 'content') and chunk.delta.content:
+                        chunk.delta.content = self._clean_text(chunk.delta.content)
+                    elif hasattr(chunk, 'content') and chunk.content:
+                        chunk.content = self._clean_text(chunk.content)
+                    elif isinstance(chunk, str):
+                        chunk = self._clean_text(chunk)
+
+                    yield chunk
+
+            yield process_stream()
+
 class VoiceAssistant(Agent):
     """A simple voice assistant that responds to user queries."""
     def __init__(self) -> None:
@@ -55,6 +95,21 @@ class VoiceAssistant(Agent):
             Keep your responses concise and conversational - aim for 1-2 sentences.
             Be friendly and natural in your speech patterns."""
         )
+
+    @function_tool()
+    async def lookup_weather(
+        self,
+        context: RunContext,
+        location: str,
+    ) -> dict[str, Any]:
+        """Look up weather information for a given location.
+        
+        Args:
+            location: The location to look up weather information for.
+        """
+        # In a real implementation, you would call a weather API here
+        # For now, return mock data
+        return {"weather": "sunny", "temperature_f": 70, "location": location}
 
 def _warmup_ollama_sync():
     """Blocking function to ping Ollama and load the model into VRAM."""
@@ -95,9 +150,11 @@ def create_local_session() -> AgentSession:
             device=WHISPER_DEVICE,
             compute_type="float16" if WHISPER_DEVICE == "cuda" else "int8",
         ),
-        llm=lk_openai.LLM.with_ollama(
-            model=OLLAMA_MODEL,
-            base_url=OLLAMA_BASE_URL,
+        llm=CleanOutputLLM(
+            lk_openai.LLM.with_ollama(
+                model=OLLAMA_MODEL,
+                base_url=OLLAMA_BASE_URL,
+            )
         ),
         tts=PiperTTS(
             model_path=PIPER_MODEL_PATH,

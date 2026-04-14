@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 import time
 import uuid
 import wave
@@ -50,6 +51,12 @@ if TYPE_CHECKING:
 __all__ = ["PiperTTS"]
 
 logger = logging.getLogger(__name__)
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences so TTS can emit audio chunk by chunk."""
+    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [p for p in parts if p.strip()]
 
 
 class _PiperChunkedStream(tts.ChunkedStream):
@@ -71,7 +78,7 @@ class _PiperChunkedStream(tts.ChunkedStream):
         self._piper_tts = tts_plugin
 
     async def _run(self, emitter: AudioEmitter) -> None:
-        """Synthesize audio and emit it to LiveKit."""
+        """Synthesize audio and emit it to LiveKit, sentence by sentence."""
         emitter.initialize(
             request_id=str(uuid.uuid4()),
             sample_rate=self._piper_tts.sample_rate,
@@ -79,19 +86,25 @@ class _PiperChunkedStream(tts.ChunkedStream):
             mime_type="audio/pcm",
         )
 
-        # Run blocking synthesis in thread pool
-        start_time = time.perf_counter()
+        sentences = _split_sentences(self._input_text)
         loop = asyncio.get_running_loop()
-        audio_bytes = await loop.run_in_executor(
-            None,
-            self._synthesize_blocking,
-            self._input_text
-        )
-        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        total_start = time.perf_counter()
 
-        logger.debug(f"TTS latency: {elapsed_ms:.0f}ms for {len(self._input_text)} chars")
+        for i, sentence in enumerate(sentences):
+            if not sentence.strip():
+                continue
+            chunk_start = time.perf_counter()
+            audio_bytes = await loop.run_in_executor(
+                None,
+                self._synthesize_blocking,
+                sentence,
+            )
+            elapsed_ms = (time.perf_counter() - chunk_start) * 1000
+            logger.debug(f"TTS chunk {i+1}/{len(sentences)}: {elapsed_ms:.0f}ms for {len(sentence)} chars")
+            emitter.push(audio_bytes)
 
-        emitter.push(audio_bytes)
+        total_ms = (time.perf_counter() - total_start) * 1000
+        logger.debug(f"TTS total: {total_ms:.0f}ms for {len(self._input_text)} chars")
 
     def _synthesize_blocking(self, text: str) -> bytes:
         """

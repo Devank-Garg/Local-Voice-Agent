@@ -1,7 +1,7 @@
 # Gemma4 Voice Assistant — Agent Reference
 
-> Fully local, offline voice conversational AI. No cloud dependencies.
-> Built with LiveKit (WebRTC), Ollama (LLM), FasterWhisper (STT), and Piper TTS.
+> Local-first voice conversational AI with optional cloud LLM support.
+> Built with LiveKit (WebRTC), FasterWhisper (STT), Piper TTS, and either Ollama (local) or Gemini (cloud) for LLM.
 
 ---
 
@@ -13,10 +13,12 @@
 |---|---|
 | LiveKit WebRTC connection | Working |
 | FasterWhisper STT (GPU) | Working |
-| Piper TTS (CPU) | Working |
-| Ollama LLM integration | Working |
-| LLM output cleaning | Working |
-| Model warmup on startup | Working |
+| Piper TTS (CPU) with sentence streaming | Working |
+| Ollama LLM (local) | Working |
+| Gemini LLM (cloud via Google API) | Working |
+| LLM provider switching via .env | Working |
+| LLM output cleaning (local only) | Working |
+| Model warmup on startup (local only) | Working |
 | Next.js frontend | Working |
 | Custom tool framework | Working (mock weather tool) |
 | Real weather API | Not implemented |
@@ -35,8 +37,12 @@ LiveKit Server (self-hosted)
      │
      │  WebRTC
      ▼
-agent.py ──── FasterWhisper STT ──── Ollama LLM ──── Piper TTS
-                  (CUDA)            (local HTTP)       (CPU)
+agent.py ──── FasterWhisper STT ──── [LLM_PROVIDER] ──── Piper TTS
+                  (CUDA)                   │                (CPU)
+                                  ┌────────┴────────┐
+                             local (Ollama)    cloud (Gemini)
+                             localhost:11434   generativelanguage
+                             + CleanOutputLLM  .googleapis.com
 ```
 
 **Data flow:**
@@ -44,9 +50,9 @@ agent.py ──── FasterWhisper STT ──── Ollama LLM ──── Pip
 2. LiveKit streams audio to agent
 3. Silero VAD detects speech boundaries
 4. FasterWhisper transcribes audio → text
-5. Text sent to Ollama LLM → response text
-6. LLM output cleaned (strip asterisks) via `CleanOutputLLM`
-7. Piper TTS synthesizes audio
+5. Text sent to LLM (Ollama or Gemini) → response text
+6. Local path: output cleaned via `CleanOutputLLM` (strips asterisks)
+7. Piper TTS synthesizes sentence by sentence, emitting audio chunks progressively
 8. Audio streamed back to user via LiveKit
 
 ---
@@ -106,9 +112,11 @@ CleanAgent/
 
 ## Configuration (.env)
 
+### Local mode (default)
+
 ```dotenv
 # LiveKit
-LIVEKIT_URL=ws://192.168.29.185:7880
+LIVEKIT_URL=ws://localhost:7880
 LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=secret
 
@@ -120,12 +128,26 @@ WHISPER_DEVICE=cuda
 PIPER_MODEL_PATH=models/piper/en_US-ryan-high.onnx
 PIPER_USE_CUDA=false
 
-# LLM
+# LLM — local Ollama
+LLM_PROVIDER=local
 OLLAMA_MODEL=ministral-3:3b
 OLLAMA_BASE_URL=http://localhost:11434/v1
 ```
 
-Frontend reads the same values from `frontend/.env.local`.
+### Cloud mode (Gemini)
+
+Add/change these in `.env`:
+
+```dotenv
+LLM_PROVIDER=cloud
+GEMINI_API_KEY=AIzaSy...          # from aistudio.google.com/apikey
+CLOUD_LLM_MODEL=gemini-2.0-flash  # or gemini-2.5-flash-lite
+CLOUD_LLM_MAX_TOKENS=200          # keep low for voice — shorter = faster
+```
+
+STT, TTS, and LiveKit remain local. Only the LLM call goes to Google.
+
+Frontend reads LiveKit values from `frontend/.env.local`.
 
 **Note:** `LIVEKIT_URL` must be `ws://localhost:7880` for local development. Using the machine's LAN IP (e.g. `ws://192.168.x.x:7880`) breaks WebRTC in the browser because HTTP over a LAN IP is not a secure context — WebRTC peer connections are blocked. For remote/mobile access you need HTTPS (ngrok or self-signed cert).
 
@@ -169,9 +191,10 @@ Install with: `npm install` inside `frontend/`
 
 - Python 3.10+
 - Node.js 18+
-- Ollama running: `ollama serve` + `ollama pull ministral-3:3b`
 - LiveKit server running and accessible at the configured URL
 - CUDA toolkit (optional, for GPU STT)
+- **Local mode only:** Ollama running — `ollama serve` + `ollama pull ministral-3:3b`
+- **Cloud mode only:** Gemini API key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
 
 ### Backend
 
@@ -196,15 +219,35 @@ The agent connects to the LiveKit room named `"console"` (hardcoded in `frontend
 
 ## LLM Integration
 
-The agent uses Ollama via the OpenAI-compatible `/v1` API endpoint:
+Controlled by `LLM_PROVIDER` in `.env`. The `_build_llm()` function in `agent.py` returns the right LLM based on this value.
+
+### Local (Ollama)
 
 ```python
-lk_openai.LLM.with_ollama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL)
+CleanOutputLLM(
+    lk_openai.LLM.with_ollama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL)
+)
 ```
 
-This is wrapped in `CleanOutputLLM` which strips `*` characters from streamed output to prevent Piper TTS from vocalizing markdown formatting.
+- Wrapped in `CleanOutputLLM` which strips `*` from streamed output (prevents Piper from speaking markdown)
+- Model warmed up on startup via a dummy POST to `/api/generate`
 
-**Model warmup:** On startup, the agent sends a minimal prompt to Ollama synchronously to preload the model into VRAM before the first user interaction.
+### Cloud (Gemini)
+
+```python
+lk_openai.LLM(
+    model=CLOUD_LLM_MODEL,
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    api_key=GEMINI_API_KEY,
+    max_completion_tokens=CLOUD_LLM_MAX_TOKENS,
+    _strict_tool_schema=False,
+)
+```
+
+- Uses Google's OpenAI-compatible endpoint — no extra SDK needed
+- `_strict_tool_schema=False` required — Gemini doesn't support OpenAI strict tool JSON schema
+- No warmup needed; no `CleanOutputLLM` (cloud models don't emit markdown asterisks in voice context)
+- Get an API key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (free tier available)
 
 ---
 
@@ -225,9 +268,10 @@ This is wrapped in `CleanOutputLLM` which strips `*` characters from streamed ou
 - Voice: `en_US-ryan-high` (male, high quality)
 - Sample rate: 22050 Hz mono
 - Runs on CPU (GPU disabled — CUDA/onnxruntime version mismatch)
+- **Sentence-level streaming**: response is split at `.`, `!`, `?` boundaries and each sentence is synthesized and emitted independently — reduces TTS TTFB from "full response" to "first sentence only"
 - Synthesis in thread pool for async safety
 - Outputs WAV → PCM frames extracted for LiveKit streaming
-- Logs latency: `TTS latency: XXms for XX chars`
+- Logs per-chunk latency: `TTS chunk N/M: XXms for XX chars`
 
 ---
 
@@ -264,10 +308,12 @@ Currently returns hardcoded data:
 
 | What to build | Where to start |
 |---|---|
+| Switch to Gemini | Set `LLM_PROVIDER=cloud` + `GEMINI_API_KEY` in `.env` |
+| Swap Ollama model | Change `OLLAMA_MODEL` in `.env` |
+| Swap Gemini model | Change `CLOUD_LLM_MODEL` in `.env` (e.g. `gemini-2.0-flash`) |
 | Add a new LLM tool | `VoiceAssistant` class in `agent.py`, use `@function_tool()` |
-| Swap LLM model | Change `OLLAMA_MODEL` in `.env` |
 | Change voice | Download new `.onnx` from HuggingFace, update `PIPER_MODEL_PATH` |
-| Change STT model size | Update `WHISPER_MODEL` in `.env` |
+| Change STT model size | Update `WHISPER_MODEL` in `.env` (`small` = faster, `large-v3` = more accurate) |
 | Add conversation history | Modify session config in `entrypoint()` |
 | Support multiple rooms | Parameterize room name in token API and agent config |
 | Add metrics/tracing | Extend the latency logging callbacks in `entrypoint()` |

@@ -50,6 +50,13 @@ PIPER_USE_CUDA = os.getenv("PIPER_USE_CUDA", "false").lower() == "true"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "ministral-3:3b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
+# Cloud LLM config (used when LLM_PROVIDER=cloud)
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "local")  # "local" | "cloud"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+CLOUD_LLM_MODEL = os.getenv("CLOUD_LLM_MODEL", "gemini-2.5-flash-lite")
+CLOUD_LLM_MAX_TOKENS = int(os.getenv("CLOUD_LLM_MAX_TOKENS", "1000"))
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
 
 class CleanOutputLLM(LLM):
     """Wrapper LLM that cleans output for speech synthesis."""
@@ -91,9 +98,10 @@ class VoiceAssistant(Agent):
     """A simple voice assistant that responds to user queries."""
     def __init__(self) -> None:
         super().__init__(
-            instructions="""You are a helpful voice AI assistant.
-            Keep your responses concise and conversational - aim for 1-2 sentences.
-            Be friendly and natural in your speech patterns."""
+            instructions="""You are a friendly, conversational AI assistant spoken through a voice interface.
+            Chat naturally about anything — answer questions, share opinions, tell jokes, discuss ideas, help with tasks.
+            Keep every response short and spoken-friendly: 1-2 sentences max, no bullet points, no markdown, no lists.
+            Only use the weather tool when the user explicitly asks about weather. For everything else, just answer directly."""
         )
 
     @function_tool()
@@ -132,12 +140,34 @@ async def warmup_ollama():
     await asyncio.to_thread(_warmup_ollama_sync)
     logger.info("Ollama warmup complete!")
 
+def _build_llm() -> LLM:
+    """Return the appropriate LLM based on LLM_PROVIDER."""
+    if LLM_PROVIDER == "cloud":
+        if not GEMINI_API_KEY:
+            raise ValueError(
+                "GEMINI_API_KEY is not set in .env. "
+                "Get one from https://aistudio.google.com/apikey"
+            )
+        logger.info(f"  Gemini API key: {GEMINI_API_KEY[:6]}...{GEMINI_API_KEY[-4:]} (from env)")
+        return lk_openai.LLM(
+            model=CLOUD_LLM_MODEL,
+            base_url=GEMINI_BASE_URL,
+            api_key=GEMINI_API_KEY,
+            max_completion_tokens=CLOUD_LLM_MAX_TOKENS,
+            _strict_tool_schema=False,
+        )
+    return CleanOutputLLM(
+        lk_openai.LLM.with_ollama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL)
+    )
+
+
 def create_local_session() -> AgentSession:
     logger.info("=" * 60)
     logger.info("STARTING PIPELINE")
     logger.info("=" * 60)
     logger.info(f"  STT: FasterWhisper ({WHISPER_MODEL} on {WHISPER_DEVICE})")
-    logger.info(f"  LLM: Ollama ({OLLAMA_MODEL})")
+    llm_label = f"Cloud inference ({CLOUD_LLM_MODEL})" if LLM_PROVIDER == "cloud" else f"Ollama ({OLLAMA_MODEL})"
+    logger.info(f"  LLM: {llm_label}")
     logger.info(f"  TTS: Piper (CUDA: {PIPER_USE_CUDA})")
     logger.info("=" * 60)
 
@@ -150,12 +180,7 @@ def create_local_session() -> AgentSession:
             device=WHISPER_DEVICE,
             compute_type="float16" if WHISPER_DEVICE == "cuda" else "int8",
         ),
-        llm=CleanOutputLLM(
-            lk_openai.LLM.with_ollama(
-                model=OLLAMA_MODEL,
-                base_url=OLLAMA_BASE_URL,
-            )
-        ),
+        llm=_build_llm(),
         tts=PiperTTS(
             model_path=PIPER_MODEL_PATH,
             use_cuda=PIPER_USE_CUDA,
@@ -195,12 +220,12 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         })
         await ctx.room.local_participant.publish_data(payload, topic="lk-chat")
 
-    await send_chat("Loading recipe to GPU oven... please give me a moment to warm up! 🍳")
-
-    # Force the model to load into GPU so the first real response is fast
-    await warmup_ollama()
-    
-    await send_chat("Ding! Oven is hot. Start speaking when you're ready! 🗣️")
+    if LLM_PROVIDER == "local":
+        await send_chat("Loading recipe to GPU oven... please give me a moment to warm up! 🍳")
+        await warmup_ollama()
+        await send_chat("Ding! Oven is hot. Start speaking when you're ready! 🗣️")
+    else:
+        await send_chat("Connected to cloud model. Start speaking when you're ready! 🗣️")
 
     await session.start(
         room=ctx.room,
@@ -209,7 +234,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     )
 
     await session.generate_reply(
-        instructions="Greet the user and let them know you're ready to help."
+        user_input="Greet the user and let them know you're ready to help."
     )
     logger.info("Agent ready - listening for speech...")
 

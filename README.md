@@ -12,7 +12,7 @@ Built with **LiveKit** (WebRTC), **Ollama** (LLM), **FasterWhisper** (STT), and 
 You:    "What's the capital of France?"
 Gemma:  "The capital of France is Paris."
 
-Round-trip latency: ~900ms  (STT: 180ms | LLM TTFT: 520ms | TTS: 95ms)
+Round-trip latency: ~900ms  (STT: 180ms | LLM : 520ms | TTS: 95ms)
 ```
 
 ---

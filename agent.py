@@ -107,27 +107,71 @@ class _StreamingLLM(LLM):
 class VoiceAssistant(Agent):
     def __init__(self, send_tool_status=None) -> None:
         super().__init__(
-            instructions="""You are a friendly, conversational AI assistant spoken through a voice interface.
-            Chat naturally about anything — answer questions, share opinions, tell jokes, discuss ideas, help with tasks.
-            Keep every response short and spoken-friendly: 1-2 sentences max, no bullet points, no markdown, no lists.
-            Only use the weather tool when the user explicitly asks about weather. For everything else, just answer directly."""
+            instructions="""You are a helpful customer support agent on a voice interface.
+            When a user calls, greet them and ask for their full name to pull up their account.
+            Once you have their name, use the lookup_customer tool to retrieve their profile.
+            If the name lookup fails or you are unsure you heard the name correctly, ask the customer for the last 4 digits of their contact phone number and use the lookup_customer_by_phone tool instead.
+            Summarise their account details in 1-2 spoken sentences — no bullet points, no markdown, no lists.
+            Keep all responses short and spoken-friendly."""
         )
         self._send_tool_status = send_tool_status or (lambda s: asyncio.sleep(0))
 
     @function_tool()
-    async def lookup_weather(
+    async def lookup_customer(
         self,
         context: RunContext,
-        location: str,
+        name: str,
     ) -> dict[str, Any]:
-        """Look up weather information for a given location.
+        """Look up a customer's account information by their full name.
 
         Args:
-            location: The location to look up weather information for.
+            name: The customer's full name as spoken (e.g. 'John Doe').
         """
         try:
-            await self._send_tool_status(f"Checking weather for {location}...")
-            return {"weather": "sunny", "temperature_f": 70, "location": location}
+            await self._send_tool_status(f"Looking up {name}...")
+            filename = name.strip().lower().replace(" ", "_") + ".md"
+            filepath = os.path.join(_script_dir, "data", "customers", filename)
+            if not os.path.exists(filepath):
+                return {"found": False, "name": name}
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            return {"found": True, "name": name, "profile": content}
+        finally:
+            await self._send_tool_status("")
+
+    @function_tool()
+    async def lookup_customer_by_phone(
+        self,
+        context: RunContext,
+        last_four: str,
+    ) -> dict[str, Any]:
+        """Look up a customer by the last 4 digits of their contact phone number.
+        Use this when the customer's name is unclear or the name lookup returned no result.
+        Convert any spoken digits to numeric form before calling (e.g. 'four four zero nine' -> '4409').
+
+        Args:
+            last_four: The last 4 digits of the customer's phone number as a 4-digit string (e.g. '4409').
+        """
+        try:
+            await self._send_tool_status(f"Verifying by phone digits {last_four}...")
+            customers_dir = os.path.join(_script_dir, "data", "customers")
+            digits = re.sub(r"\D", "", last_four)[-4:]
+            if len(digits) != 4:
+                return {"found": False, "reason": "Invalid input — please pass exactly 4 digits"}
+            for filename in os.listdir(customers_dir):
+                if not filename.endswith(".md"):
+                    continue
+                filepath = os.path.join(customers_dir, filename)
+                with open(filepath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                # Match only digits on the Phone line, stopping at end of line
+                phone_match = re.search(r"\*\*Phone\*\*:\s*([^\n]+)", content)
+                if phone_match:
+                    phone_digits = re.sub(r"\D", "", phone_match.group(1))
+                    if len(phone_digits) >= 4 and phone_digits.endswith(digits):
+                        name = filename.replace("_", " ").replace(".md", "").title()
+                        return {"found": True, "name": name, "profile": content}
+            return {"found": False, "last_four": last_four}
         finally:
             await self._send_tool_status("")
 
@@ -267,7 +311,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     )
 
     await session.generate_reply(
-        user_input="Greet the user and let them know you're ready to help."
+        user_input="Greet the caller warmly and ask for their full name so you can pull up their account."
     )
     logger.info("Agent ready - listening for speech...")
 

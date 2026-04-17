@@ -191,20 +191,26 @@ Install with: `npm install` inside `frontend/`
 
 - Python 3.10+
 - Node.js 18+
-- LiveKit server running and accessible at the configured URL
+- [Docker](https://docs.docker.com/get-docker/) installed (for LiveKit server)
 - CUDA toolkit (optional, for GPU STT)
 - **Local mode only:** Ollama running — `ollama serve` + `ollama pull ministral-3:3b`
 - **Cloud mode only:** Gemini API key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
 
-### Backend
+### 1. LiveKit server (Docker)
+
+```bash
+docker run --rm -p 7880:7880 -p 7881:7881 -p 7882:7882/udp livekit/livekit-server --dev --bind 0.0.0.0
+```
+
+### 2. Backend
 
 ```bash
 cd CleanAgent
 uv pip install -e .
-python agent.py dev   # or: python agent.py start
+python agent.py dev
 ```
 
-### Frontend
+### 3. Frontend
 
 ```bash
 cd CleanAgent/frontend

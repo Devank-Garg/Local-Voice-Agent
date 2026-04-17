@@ -15,25 +15,21 @@ import json
 import re
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from typing import Any
+from typing import Any, Callable, Coroutine
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-# Load environment variables from .env
 load_dotenv(os.path.join(_script_dir, ".env"))
 
-# Add src to python path for local imports
 sys.path.insert(0, os.path.join(_script_dir, "src"))
 
 from livekit import agents, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions, function_tool, RunContext
-from livekit.agents.llm import LLM, ChatContext, ChatChunk
+from livekit.agents.llm import LLM, ChatContext, ChatChunk, ChatMessage
 from livekit.plugins import silero
 from livekit.plugins import openai as lk_openai
 
-# Local plugins
 from local_livekit_plugins import FasterWhisperSTT, PiperTTS
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(name)-20s | %(levelname)-8s | %(message)s"
@@ -50,7 +46,6 @@ PIPER_USE_CUDA = os.getenv("PIPER_USE_CUDA", "false").lower() == "true"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "ministral-3:3b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 
-# Cloud LLM config (used when LLM_PROVIDER=cloud)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "local")  # "local" | "cloud"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 CLOUD_LLM_MODEL = os.getenv("CLOUD_LLM_MODEL", "gemini-2.5-flash-lite")
@@ -58,51 +53,66 @@ CLOUD_LLM_MAX_TOKENS = int(os.getenv("CLOUD_LLM_MAX_TOKENS", "1000"))
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
-class CleanOutputLLM(LLM):
-    """Wrapper LLM that cleans output for speech synthesis."""
+# Type alias for the streaming callback
+TextStreamCallback = Callable[[str, str, bool], Coroutine]
 
-    def __init__(self, base_llm: LLM):
+
+class _StreamingLLM(LLM):
+    """LLM wrapper: optionally cleans output for TTS and streams text chunks to the UI."""
+
+    def __init__(self, base_llm: LLM, *, clean_output: bool = False, on_text_stream: TextStreamCallback | None = None):
         super().__init__()
         self.base_llm = base_llm
+        self._clean_output = clean_output
+        self._on_text_stream = on_text_stream
 
-    def _clean_text(self, text: str) -> str:
-        """Clean LLM output to make it suitable for speech synthesis."""
-        if not text:
-            return text
-
-        # Only remove asterisks used for emphasis or markdown bold/italic
-        return text.replace('*', '')
+    def _clean(self, text: str) -> str:
+        return text.replace('*', '') if text else text
 
     @asynccontextmanager
     async def chat(self, *, chat_ctx: ChatContext, tools=None, tool_choice=None, **kwargs):
-        """Override chat method to clean output."""
         async with self.base_llm.chat(chat_ctx=chat_ctx, tools=tools, tool_choice=tool_choice, **kwargs) as stream:
+            stream_id = str(time.time())
+
             async def process_stream():
                 async for chunk in stream:
                     if chunk is None:
                         continue
 
-                    # Clean the content if it exists
+                    text = None
                     if hasattr(chunk, 'delta') and hasattr(chunk.delta, 'content') and chunk.delta.content:
-                        chunk.delta.content = self._clean_text(chunk.delta.content)
+                        if self._clean_output:
+                            chunk.delta.content = self._clean(chunk.delta.content)
+                        text = chunk.delta.content
                     elif hasattr(chunk, 'content') and chunk.content:
-                        chunk.content = self._clean_text(chunk.content)
+                        if self._clean_output:
+                            chunk.content = self._clean(chunk.content)
+                        text = chunk.content
                     elif isinstance(chunk, str):
-                        chunk = self._clean_text(chunk)
+                        if self._clean_output:
+                            chunk = self._clean(chunk)
+                        text = chunk
+
+                    if text and self._on_text_stream:
+                        asyncio.create_task(self._on_text_stream(stream_id, text, False))
 
                     yield chunk
 
+                if self._on_text_stream:
+                    asyncio.create_task(self._on_text_stream(stream_id, "", True))
+
             yield process_stream()
 
+
 class VoiceAssistant(Agent):
-    """A simple voice assistant that responds to user queries."""
-    def __init__(self) -> None:
+    def __init__(self, send_tool_status=None) -> None:
         super().__init__(
             instructions="""You are a friendly, conversational AI assistant spoken through a voice interface.
             Chat naturally about anything — answer questions, share opinions, tell jokes, discuss ideas, help with tasks.
             Keep every response short and spoken-friendly: 1-2 sentences max, no bullet points, no markdown, no lists.
             Only use the weather tool when the user explicitly asks about weather. For everything else, just answer directly."""
         )
+        self._send_tool_status = send_tool_status or (lambda s: asyncio.sleep(0))
 
     @function_tool()
     async def lookup_weather(
@@ -111,16 +121,18 @@ class VoiceAssistant(Agent):
         location: str,
     ) -> dict[str, Any]:
         """Look up weather information for a given location.
-        
+
         Args:
             location: The location to look up weather information for.
         """
-        # In a real implementation, you would call a weather API here
-        # For now, return mock data
-        return {"weather": "sunny", "temperature_f": 70, "location": location}
+        try:
+            await self._send_tool_status(f"Checking weather for {location}...")
+            return {"weather": "sunny", "temperature_f": 70, "location": location}
+        finally:
+            await self._send_tool_status("")
+
 
 def _warmup_ollama_sync():
-    """Blocking function to ping Ollama and load the model into VRAM."""
     try:
         ollama_host = OLLAMA_BASE_URL.replace("/v1", "")
         req = urllib.request.Request(
@@ -134,14 +146,14 @@ def _warmup_ollama_sync():
     except Exception as e:
         logger.warning(f"Warmup ping failed: {e}")
 
+
 async def warmup_ollama():
-    """Async wrapper for the ollama warmup."""
     logger.info("Warming up Ollama VRAM...")
     await asyncio.to_thread(_warmup_ollama_sync)
     logger.info("Ollama warmup complete!")
 
-def _build_llm() -> LLM:
-    """Return the appropriate LLM based on LLM_PROVIDER."""
+
+def _build_llm(on_text_stream: TextStreamCallback | None = None) -> LLM:
     if LLM_PROVIDER == "cloud":
         if not GEMINI_API_KEY:
             raise ValueError(
@@ -149,19 +161,25 @@ def _build_llm() -> LLM:
                 "Get one from https://aistudio.google.com/apikey"
             )
         logger.info(f"  Gemini API key: {GEMINI_API_KEY[:6]}...{GEMINI_API_KEY[-4:]} (from env)")
-        return lk_openai.LLM(
-            model=CLOUD_LLM_MODEL,
-            base_url=GEMINI_BASE_URL,
-            api_key=GEMINI_API_KEY,
-            max_completion_tokens=CLOUD_LLM_MAX_TOKENS,
-            _strict_tool_schema=False,
+        return _StreamingLLM(
+            lk_openai.LLM(
+                model=CLOUD_LLM_MODEL,
+                base_url=GEMINI_BASE_URL,
+                api_key=GEMINI_API_KEY,
+                max_completion_tokens=CLOUD_LLM_MAX_TOKENS,
+                _strict_tool_schema=False,
+            ),
+            clean_output=False,
+            on_text_stream=on_text_stream,
         )
-    return CleanOutputLLM(
-        lk_openai.LLM.with_ollama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL)
+    return _StreamingLLM(
+        lk_openai.LLM.with_ollama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL),
+        clean_output=True,
+        on_text_stream=on_text_stream,
     )
 
 
-def create_local_session() -> AgentSession:
+def create_local_session(on_text_stream: TextStreamCallback | None = None) -> AgentSession:
     logger.info("=" * 60)
     logger.info("STARTING PIPELINE")
     logger.info("=" * 60)
@@ -180,7 +198,7 @@ def create_local_session() -> AgentSession:
             device=WHISPER_DEVICE,
             compute_type="float16" if WHISPER_DEVICE == "cuda" else "int8",
         ),
-        llm=_build_llm(),
+        llm=_build_llm(on_text_stream=on_text_stream),
         tts=PiperTTS(
             model_path=PIPER_MODEL_PATH,
             use_cuda=PIPER_USE_CUDA,
@@ -190,19 +208,42 @@ def create_local_session() -> AgentSession:
 
 
 async def entrypoint(ctx: agents.JobContext) -> None:
-    """Main entrypoint for the voice agent."""
     logger.info(f"Joining room: {ctx.room.name}")
     await ctx.connect()
 
-    session = create_local_session()
-
     _transcription_time: float | None = None
+
+    async def send_chat(msg: str, role: str = "agent"):
+        payload = json.dumps({
+            "type": "message",
+            "id": str(time.time()),
+            "role": role,
+            "message": msg,
+            "timestamp": int(time.time() * 1000)
+        })
+        await ctx.room.local_participant.publish_data(payload, topic="lk-chat")
+
+    async def send_tool_status(status: str):
+        payload = json.dumps({"type": "tool_status", "status": status})
+        await ctx.room.local_participant.publish_data(payload, topic="lk-chat")
+
+    async def send_stream_chunk(stream_id: str, text: str, is_final: bool):
+        if is_final:
+            payload = json.dumps({"type": "stream_end", "stream_id": stream_id})
+        else:
+            payload = json.dumps({"type": "stream_chunk", "stream_id": stream_id, "text": text})
+        await ctx.room.local_participant.publish_data(payload, topic="lk-chat")
+
+    # Build session with streaming callback wired in
+    session = create_local_session(on_text_stream=send_stream_chunk)
 
     @session.on("user_input_transcribed")
     def on_user_input_transcribed(ev) -> None:
         nonlocal _transcription_time
         _transcription_time = time.perf_counter()
         logger.debug(f"User said: {ev.transcript[:80]}...")
+        if ev.is_final:
+            asyncio.create_task(send_chat(ev.transcript, role="user"))
 
     @session.on("agent_state_changed")
     def on_agent_state_changed(ev) -> None:
@@ -212,24 +253,16 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             logger.info(f"ROUND-TRIP LATENCY: {latency_ms:.0f}ms (LLM + TTS)")
             _transcription_time = None
 
-    async def send_chat(msg: str):
-        payload = json.dumps({
-            "id": str(time.time()),
-            "message": msg,
-            "timestamp": int(time.time() * 1000)
-        })
-        await ctx.room.local_participant.publish_data(payload, topic="lk-chat")
-
     if LLM_PROVIDER == "local":
-        await send_chat("Loading recipe to GPU oven... please give me a moment to warm up! 🍳")
+        await send_chat("Loading model into GPU... give me a moment to warm up!")
         await warmup_ollama()
-        await send_chat("Ding! Oven is hot. Start speaking when you're ready! 🗣️")
+        await send_chat("Ready! Start speaking whenever you like.")
     else:
-        await send_chat("Connected to cloud model. Start speaking when you're ready! 🗣️")
+        await send_chat("Connected. Start speaking whenever you like.")
 
     await session.start(
         room=ctx.room,
-        agent=VoiceAssistant(),
+        agent=VoiceAssistant(send_tool_status=send_tool_status),
         room_input_options=RoomInputOptions(),
     )
 

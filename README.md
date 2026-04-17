@@ -1,8 +1,19 @@
 # Local Voice Agent
 
-A fully local, real-time voice AI assistant with zero cloud dependencies. Speak to it in your browser, get a spoken response back — all processing runs on your own hardware.
+A fully local, real-time voice AI assistant. Speak to it in your browser, get a spoken response back — all processing runs on your own hardware. Supports both local (Ollama) and cloud (Gemini) LLM backends.
 
-Built with **LiveKit** (WebRTC), **Ollama** (LLM), **FasterWhisper** (STT), and **Piper TTS**, connected by a custom LiveKit Agents pipeline. A **Next.js** frontend provides the browser interface.
+Built with **LiveKit** (WebRTC), **Ollama / Gemini** (LLM), **FasterWhisper** (STT), and **Piper TTS**, connected by a custom LiveKit Agents pipeline. A **Next.js** frontend with a futuristic voice-first UI.
+
+---
+
+## Features
+
+- **Fully local pipeline** — STT, TTS, and WebRTC all run on your machine
+- **Switchable LLM backend** — local Ollama or cloud Gemini via a single `.env` flag
+- **Futuristic UI** — animated orb with ripple rings, ambient glows, speaking/listening/thinking states
+- **Tool support** — `@function_tool` framework with live status indicators
+- **Clean disconnect** — Leave button returns to welcome screen without a reload
+- **Configurable agent name** — `NEXT_PUBLIC_AGENT_NAME` in `frontend/.env.local`
 
 ---
 
@@ -10,9 +21,9 @@ Built with **LiveKit** (WebRTC), **Ollama** (LLM), **FasterWhisper** (STT), and 
 
 ```
 You:    "What's the capital of France?"
-Gemma:  "The capital of France is Paris."
+Agent:  "The capital of France is Paris."
 
-Round-trip latency: ~900ms  (STT: 180ms | LLM : 520ms | TTS: 95ms)
+Round-trip latency: ~900ms  (STT: 180ms | LLM: 520ms | TTS: 95ms)
 ```
 
 ---
@@ -44,7 +55,7 @@ Round-trip latency: ~900ms  (STT: 180ms | LLM : 520ms | TTS: 95ms)
 │                      Python Agent  (agent.py)                       │
 │                                                                      │
 │  ┌─────────────┐    ┌──────────────────┐    ┌─────────────────────┐ │
-│  │ Silero VAD  │───▶│ FasterWhisper    │───▶│  CleanOutputLLM     │ │
+│  │ Silero VAD  │───▶│ FasterWhisper    │───▶│  _StreamingLLM     │ │
 │  │  (CPU)      │    │ STT  (CUDA)      │    │  ↳ Ollama wrapper   │ │
 │  │             │    │                  │    │                     │ │
 │  │ detects     │    │  medium model    │    │  ministral-3b       │ │
@@ -79,7 +90,7 @@ Round-trip latency: ~900ms  (STT: 180ms | LLM : 520ms | TTS: 95ms)
 [FasterWhisper STT]  ~100–300ms
         │  "what's the capital of france?"
         ▼
-[CleanOutputLLM]  strips markdown (* chars) from streamed output
+[_StreamingLLM]  strips markdown (* chars) from streamed output
         │
         ▼
 [Ollama LLM]  ~300–800ms to first token, streams response
@@ -206,7 +217,7 @@ CleanAgent/
 - Python 3.10+
 - Node.js 18+
 - [Ollama](https://ollama.com) installed and running
-- [LiveKit server](https://github.com/livekit/livekit/releases/latest) binary
+- [Docker](https://docs.docker.com/get-docker/) (for LiveKit server)
 - CUDA toolkit (optional, for GPU STT)
 
 ### 1. Download the Piper voice model
@@ -221,7 +232,7 @@ curl -L -o models/piper/en_US-ryan-high.onnx.json \
 
 ### 2. Configure environment
 
-Create `.env` in the project root and `frontend/.env.local` with identical values:
+**`.env`** (project root):
 
 ```dotenv
 # LiveKit
@@ -237,9 +248,25 @@ WHISPER_DEVICE=cuda           # cuda | cpu
 PIPER_MODEL_PATH=models/piper/en_US-ryan-high.onnx
 PIPER_USE_CUDA=false          # GPU has CUDA/onnxruntime version constraints
 
-# LLM
+# LLM — local
+LLM_PROVIDER=local
 OLLAMA_MODEL=ministral-3b:3b
 OLLAMA_BASE_URL=http://localhost:11434/v1
+
+# LLM — cloud (set LLM_PROVIDER=cloud to use Gemini instead)
+# GEMINI_API_KEY=AIzaSy...
+# CLOUD_LLM_MODEL=gemini-2.5-flash-lite
+```
+
+**`frontend/.env.local`** (same LiveKit values, plus UI config):
+
+```dotenv
+LIVEKIT_URL=ws://localhost:7880
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=secret
+
+# Agent display name shown in the UI
+NEXT_PUBLIC_AGENT_NAME=JARVIS
 ```
 
 ### 3. Install dependencies
@@ -259,8 +286,8 @@ cd frontend && npm install
 ### 4. Run (4 terminals)
 
 ```bash
-# Terminal 1 — LiveKit server (--dev uses devkey/secret, no config needed)
-livekit-server --dev --bind 0.0.0.0
+# Terminal 1 — LiveKit server via Docker (--dev uses devkey/secret, no config needed)
+docker run --rm -p 7880:7880 -p 7881:7881 -p 7882:7882/udp livekit/livekit-server --dev --bind 0.0.0.0
 
 # Terminal 2 — Ollama
 ollama serve
@@ -313,7 +340,7 @@ The included `lookup_weather` tool returns mock data — replace it with a real 
 | Error | Cause | Fix |
 |---|---|---|
 | `could not establish pc connection` | Accessing via LAN IP | Use `http://localhost:3000` |
-| `ClientConnectorError: Cannot connect to 7880` | LiveKit server not running | Start `livekit-server --dev` |
+| `ClientConnectorError: Cannot connect to 7880` | LiveKit server not running | Run the Docker command in Terminal 1 |
 | Slow first response (5–30s) | Ollama model cold-start | Wait for "Oven is hot" in chat |
 | No audio output | Wrong Piper model path | Check `PIPER_MODEL_PATH` in `.env` |
 | Agent not joining room | `python agent.py` not running | Start the agent in dev mode |

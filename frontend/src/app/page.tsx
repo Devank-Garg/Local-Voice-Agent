@@ -60,10 +60,7 @@ export default function Home() {
 
   if (!started) {
     return (
-      <main className="relative flex h-[100dvh] w-full flex-col items-center justify-center bg-bg-dark overflow-hidden">
-        {/* ambient blobs */}
-        <div className="ambient-blob w-96 h-96 bg-blue-900/20 top-[-15%] left-[-10%]" />
-        <div className="ambient-blob w-72 h-72 bg-cyan-900/15 bottom-[5%] right-[-5%]" style={{ animationDelay: "4s" }} />
+      <main className="ambient-bg relative flex h-[100dvh] w-full flex-col items-center justify-center bg-bg-dark overflow-hidden">
 
         <div className="relative z-10 flex flex-col items-center text-center space-y-8 px-8 max-w-sm w-full">
           <div className="space-y-2">

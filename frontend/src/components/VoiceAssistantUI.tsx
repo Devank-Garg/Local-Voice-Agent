@@ -65,12 +65,7 @@ export default function VoiceAssistantUI() {
   };
 
   return (
-    <div className="relative flex flex-col items-center justify-between h-full w-full overflow-hidden">
-
-      {/* Ambient background blobs */}
-      <div className="ambient-blob w-96 h-96 bg-blue-900/20 top-[-10%] left-[-10%]" style={{ animationDelay: "0s" }} />
-      <div className="ambient-blob w-80 h-80 bg-cyan-900/15 bottom-[10%] right-[-5%]" style={{ animationDelay: "4s" }} />
-      <div className="ambient-blob w-64 h-64 bg-purple-900/15 bottom-[20%] left-[5%]" style={{ animationDelay: "8s" }} />
+    <div className="ambient-bg relative flex flex-col items-center justify-between h-full w-full overflow-hidden">
 
       {/* Top — Agent name */}
       <div className="relative z-10 pt-16 text-center">

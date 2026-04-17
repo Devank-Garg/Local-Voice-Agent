@@ -22,20 +22,12 @@
   border: 1px solid rgba(255, 255, 255, 0.07);
 }
 
-/* ── Background ambient blobs ── */
-@keyframes blobDrift {
-  0%   { transform: translate(0, 0) scale(1); }
-  33%  { transform: translate(30px, -20px) scale(1.05); }
-  66%  { transform: translate(-20px, 10px) scale(0.97); }
-  100% { transform: translate(0, 0) scale(1); }
-}
-
-.ambient-blob {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(80px);
-  animation: blobDrift 12s ease-in-out infinite;
-  pointer-events: none;
+/* ── Background ambient gradient ── */
+.ambient-bg {
+  background:
+    radial-gradient(ellipse 60% 50% at 15% 10%, rgba(0, 69, 250, 0.10) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 40% at 85% 80%, rgba(0, 210, 254, 0.07) 0%, transparent 70%),
+    radial-gradient(ellipse 40% 35% at 10% 85%, rgba(100, 60, 220, 0.07) 0%, transparent 70%);
 }
 
 /* ── Orb idle breathe ── */
